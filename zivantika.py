@@ -2,12 +2,24 @@ import os
 import streamlit as st
 import tempfile
 from PIL import Image
+import subprocess
+import sys
 
-# 🔧 Fix Streamlit + Torch watcher bug and other environment issues
+# 🔧 Set environment variables to prevent GUI dependencies
 os.environ["STREAMLIT_WATCHER_IGNORE"] = "tornado,torch"
-os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"  # Avoid OpenEXR issues
+os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
+os.environ["QT_QPA_PLATFORM"] = "offscreen"  # Prevent Qt GUI dependencies
+os.environ["PYTHONPATH"] = "/home/adminuser/venv/lib/python3.11/site-packages"
 
-# Try to import ultralytics with error handling
+# Try to install headless OpenCV first
+try:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", 
+                          "opencv-python-headless==4.5.5.64", "--force-reinstall"])
+    st.success("Installed opencv-python-headless")
+except Exception as e:
+    st.warning(f"Could not install headless OpenCV: {e}")
+
+# Now try to import ultralytics
 try:
     from ultralytics import YOLO
     ULTRAlytics_AVAILABLE = True
@@ -15,48 +27,71 @@ except ImportError as e:
     st.error(f"Failed to import ultralytics: {e}")
     ULTRAlytics_AVAILABLE = False
 except OSError as e:
-    st.error(f"OS error when importing ultralytics: {e}")
-    ULTRAlytics_AVAILABLE = False
+    if "libGL.so.1" in str(e):
+        # Try to work around the OpenCV issue
+        st.warning("OpenCV GUI dependencies missing. Trying alternative approach...")
+        try:
+            # Force use of headless backend
+            import cv2
+            cv2.setUseOptimized(True)
+            # Now retry ultralytics import
+            from ultralytics import YOLO
+            ULTRAlytics_AVAILABLE = True
+            st.success("Successfully imported ultralytics with workaround!")
+        except Exception as inner_e:
+            st.error(f"Still failed to import: {inner_e}")
+            ULTRAlytics_AVAILABLE = False
+    else:
+        st.error(f"OS error: {e}")
+        ULTRAlytics_AVAILABLE = False
 
 # Streamlit UI
 st.set_page_config(page_title="PPE Detection", layout="wide")
 st.title("🦺 PPE Detection App")
 st.write("Upload an image or video to detect PPE (Hardhat, Safety Vest, Person).")
 
-# Show warning if ultralytics is not available
 if not ULTRAlytics_AVAILABLE:
-    st.warning("""
-    **Dependencies not fully loaded.** 
-    This may be due to missing system libraries. 
-    Trying to install required packages...
+    st.error("""
+    **Critical: Unable to load computer vision dependencies.**
+    
+    This is likely due to missing system libraries in the Streamlit Cloud environment.
+    Please try these alternatives:
+    
+    1. **Use a different model format**: Convert your YOLO model to ONNX or TensorFlow Lite
+    2. **Use a different detection library**: Consider using TensorFlow or PyTorch directly
+    3. **Local deployment**: Run this app on your local machine instead of Streamlit Cloud
+    
+    For immediate testing, you can use a simplified version without ultralytics:
     """)
     
-    # Try to install required packages
-    try:
-        import subprocess
-        import sys
-        subprocess.check_call([sys.executable, "-m", "pip", "install", 
-                              "opencv-python-headless==4.5.5.64", "ultralytics==8.3.191"])
-        st.success("Packages installed successfully! Please refresh the page.")
-    except Exception as e:
-        st.error(f"Failed to install packages: {e}")
+    # Simple file upload demo without ultralytics
+    uploaded_file = st.file_uploader("Upload Image (Demo Mode)", type=["jpg", "jpeg", "png"])
+    if uploaded_file:
+        image = Image.open(uploaded_file)
+        st.image(image, caption="Uploaded Image (Demo Mode - No Detection)", use_container_width=True)
+        st.info("In demo mode - detection would normally happen here with ultralytics")
     st.stop()
 
-# Load your trained model (update path if needed)
+# Load your trained model
 MODEL_PATH = "runs/detect/train/weights/best.pt"
 
 # Check if model file exists
 if not os.path.exists(MODEL_PATH):
-    st.error(f"Model file not found at: {MODEL_PATH}")
-    st.info("Please make sure your model is available at the specified path.")
-    st.stop()
-
-try:
-    model = YOLO(MODEL_PATH)
-    st.success("Model loaded successfully!")
-except Exception as e:
-    st.error(f"Failed to load model: {e}")
-    st.stop()
+    st.warning(f"Model file not found at: {MODEL_PATH}")
+    st.info("Using default YOLOv8 model for demonstration...")
+    try:
+        model = YOLO('yolov8n.pt')  # Use default nano model
+        st.success("Loaded default YOLOv8n model for demonstration")
+    except Exception as e:
+        st.error(f"Could not load default model: {e}")
+        st.stop()
+else:
+    try:
+        model = YOLO(MODEL_PATH)
+        st.success("Custom model loaded successfully!")
+    except Exception as e:
+        st.error(f"Failed to load custom model: {e}")
+        st.stop()
 
 # File uploader
 uploaded_file = st.file_uploader("Upload Image/Video", type=["jpg", "jpeg", "png", "mp4"])
@@ -72,7 +107,7 @@ if uploaded_file:
         # Run YOLOv8 inference
         st.write("🔎 Running detection...")
         try:
-            results = model.predict(image)
+            results = model.predict(image, conf=0.5)
             
             # Show output
             result_img = results[0].plot()  # numpy array (BGR)
@@ -80,41 +115,25 @@ if uploaded_file:
             
             # Display detection summary
             if hasattr(results[0], 'boxes') and results[0].boxes is not None:
-                st.write(f"Detected {len(results[0].boxes)} objects")
+                detected_count = len(results[0].boxes)
+                st.write(f"✅ Detected {detected_count} objects")
+                
+                # Show class names if available
+                if hasattr(results[0], 'names'):
+                    class_counts = {}
+                    for box in results[0].boxes:
+                        cls = int(box.cls)
+                        class_name = results[0].names[cls]
+                        class_counts[class_name] = class_counts.get(class_name, 0) + 1
+                    
+                    for class_name, count in class_counts.items():
+                        st.write(f"- {class_name}: {count}")
+                        
         except Exception as e:
             st.error(f"Error during detection: {e}")
 
     # Handle Videos
     elif file_type.startswith("video"):
         st.video(uploaded_file)
-        st.write("⚡ Running detection on video...")
-
-        # Create temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
-            tmp_file.write(uploaded_file.getbuffer())
-            tmp_file_path = tmp_file.name
-
-        try:
-            # Run prediction
-            results = model.predict(tmp_file_path, save=True, project="runs/streamlit_results", name="ppe_video")
-            
-            # Find the output video
-            output_dir = "runs/streamlit_results/ppe_video"
-            if os.path.exists(output_dir):
-                output_files = os.listdir(output_dir)
-                video_files = [f for f in output_files if f.endswith('.mp4')]
-                if video_files:
-                    output_video_path = os.path.join(output_dir, video_files[0])
-                    st.success("✅ Video processed successfully!")
-                    st.video(output_video_path)
-                else:
-                    st.warning("⚠️ No output video found in results directory")
-            else:
-                st.error("❌ Output directory not found")
-                
-        except Exception as e:
-            st.error(f"Error processing video: {e}")
-        finally:
-            # Clean up temporary file
-            if os.path.exists(tmp_file_path):
-                os.unlink(tmp_file_path)
+        st.info("Video processing is disabled in this environment due to library limitations.")
+        st.write("For video processing, please run this application locally on your machine.")
