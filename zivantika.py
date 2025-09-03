@@ -1,13 +1,111 @@
 import os
+import sys
 import streamlit as st
-from ultralytics import YOLO
-from PIL import Image
-import tempfile
-import cv2
-import numpy as np
+import subprocess
+import importlib.util
 
-# 🔧 Fix Streamlit + Torch watcher bug
+# Set environment variables before any other imports
 os.environ["STREAMLIT_WATCHER_IGNORE"] = "tornado,torch"
+os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
+os.environ["PYTHONPATH"] = "/home/adminuser/venv/lib/python3.11/site-packages"
+
+def install_system_packages():
+    """Install system packages required for OpenCV"""
+    packages = [
+        "libglib2.0-0",
+        "libsm6", 
+        "libxext6",
+        "libxrender-dev",
+        "libgomp1",
+        "libgl1-mesa-glx",
+        "ffmpeg",
+        "libsm6",
+        "libxext6"
+    ]
+    
+    try:
+        for package in packages:
+            subprocess.run(["apt-get", "install", "-y", package], 
+                         capture_output=True, check=True)
+    except:
+        pass  # Ignore errors in system package installation
+
+def check_and_install_packages():
+    """Check and install required Python packages"""
+    required_packages = {
+        'ultralytics': 'ultralytics==8.0.196',
+        'cv2': 'opencv-python-headless==4.8.1.78',
+        'PIL': 'Pillow',
+        'torch': 'torch',
+        'numpy': 'numpy'
+    }
+    
+    missing_packages = []
+    
+    for package_name, install_name in required_packages.items():
+        if importlib.util.find_spec(package_name) is None:
+            missing_packages.append(install_name)
+    
+    if missing_packages:
+        st.error(f"Missing packages: {', '.join(missing_packages)}")
+        st.info("Installing required packages...")
+        
+        for package in missing_packages:
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+                st.success(f"Installed {package}")
+            except subprocess.CalledProcessError as e:
+                st.error(f"Failed to install {package}: {e}")
+        
+        st.info("Please refresh the page after installation completes.")
+        st.stop()
+
+# Install system packages
+install_system_packages()
+
+# Check and install Python packages
+check_and_install_packages()
+
+# Now try to import required libraries
+try:
+    import cv2
+    import numpy as np
+    from PIL import Image
+    import tempfile
+    from ultralytics import YOLO
+    
+    st.success("✅ All packages imported successfully!")
+    
+except ImportError as e:
+    st.error(f"❌ Import error: {str(e)}")
+    st.info("""
+    **To fix this error:**
+    
+    1. Create a `packages.txt` file in your repository root with:
+    ```
+    libglib2.0-0
+    libsm6
+    libxext6
+    libxrender-dev
+    libgomp1
+    libgl1-mesa-glx
+    ffmpeg
+    ```
+    
+    2. Create a `requirements.txt` file with:
+    ```
+    streamlit
+    ultralytics==8.0.196
+    opencv-python-headless==4.8.1.78
+    Pillow>=9.0.0
+    torch>=1.11.0
+    torchvision>=0.12.0
+    numpy>=1.21.0
+    ```
+    
+    3. Redeploy your Streamlit app
+    """)
+    st.stop()
 
 @st.cache_resource
 def load_model():
@@ -17,7 +115,15 @@ def load_model():
     # Check if model file exists
     if not os.path.exists(MODEL_PATH):
         st.error(f"❌ Model file not found at: {MODEL_PATH}")
-        st.info("Please ensure your trained model is placed at the correct path.")
+        st.info("""
+        **Model file missing!**
+        
+        Please ensure your trained model is placed at: `runs/detect/train/weights/best.pt`
+        
+        You can either:
+        1. Upload your trained model to this path in your repository
+        2. Or modify the MODEL_PATH variable to point to your model location
+        """)
         st.stop()
     
     try:
@@ -25,6 +131,7 @@ def load_model():
         return model
     except Exception as e:
         st.error(f"❌ Error loading model: {str(e)}")
+        st.info("Make sure your model file is a valid YOLO model (.pt file)")
         st.stop()
 
 # Load your trained model
@@ -52,25 +159,29 @@ if uploaded_file:
             
             # Convert PIL image to format that YOLO can process
             image_array = np.array(image)
-            results = model.predict(image_array)
+            
+            with st.spinner("Processing image..."):
+                results = model.predict(image_array, verbose=False)
             
             # Show output
             if results and len(results) > 0:
                 result_img = results[0].plot()  # numpy array (BGR)
-                
                 # Convert BGR to RGB for proper display in Streamlit
-                if CV2_AVAILABLE:
-                    result_img_rgb = cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB)
-                else:
-                    # Alternative BGR to RGB conversion without cv2
-                    result_img_rgb = result_img[:, :, ::-1]
-                    
+                result_img_rgb = cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB)
                 st.image(result_img_rgb, caption="Detection Result", use_container_width=True)
+                
+                # Show detection statistics
+                detections = results[0].boxes
+                if detections is not None and len(detections) > 0:
+                    st.info(f"🎯 Found {len(detections)} detections")
+                else:
+                    st.warning("⚠️ No objects detected in the image")
             else:
                 st.warning("⚠️ No detections found in the image.")
                 
         except Exception as e:
             st.error(f"❌ Error processing image: {str(e)}")
+            st.info("Please try with a different image or check if the model is compatible.")
 
     # Handle Videos
     elif file_type.startswith("video"):
@@ -88,12 +199,13 @@ if uploaded_file:
             os.makedirs(output_base, exist_ok=True)
 
             # Run prediction with progress indicator
-            with st.spinner("Processing video..."):
+            with st.spinner("Processing video... This may take a while for large files."):
                 results = model.predict(
                     tmp_file_path, 
                     save=True, 
                     project="runs/streamlit_results", 
-                    name="ppe_video"
+                    name="ppe_video",
+                    verbose=False
                 )
                 
                 # Find the output video
@@ -120,11 +232,11 @@ if uploaded_file:
                 if os.path.exists(tmp_file_path):
                     os.unlink(tmp_file_path)
             except Exception as cleanup_error:
-                # Don't show error to user for cleanup issues
-                pass
+                pass # Ignore cleanup errors
                 
         except Exception as e:
             st.error(f"❌ Error processing video: {str(e)}")
+            st.info("Please try with a smaller video file or different format.")
             
             # Clean up temporary file in case of error
             try:
@@ -146,7 +258,33 @@ with st.expander("ℹ️ How to use this app"):
 
 with st.expander("🛠️ Troubleshooting"):
     st.markdown("""
+    **Common Issues:**
     - **Model not found**: Ensure your trained model is at `runs/detect/train/weights/best.pt`
+    - **Import errors**: Make sure `packages.txt` and `requirements.txt` are properly configured
     - **Video processing fails**: Try with a smaller video file first
     - **No detections**: The model may not detect PPE if confidence is too low
+    
+    **Required Files for Deployment:**
+    - `packages.txt` (for system packages)
+    - `requirements.txt` (for Python packages)
+    - Your trained model at the correct path
     """)
+
+with st.expander("📋 Setup Files"):
+    st.markdown("**packages.txt:**")
+    st.code("""libglib2.0-0
+libsm6
+libxext6
+libxrender-dev
+libgomp1
+libgl1-mesa-glx
+ffmpeg""")
+    
+    st.markdown("**requirements.txt:**")
+    st.code("""streamlit
+ultralytics==8.0.196
+opencv-python-headless==4.8.1.78
+Pillow>=9.0.0
+torch>=1.11.0
+torchvision>=0.12.0
+numpy>=1.21.0""")
