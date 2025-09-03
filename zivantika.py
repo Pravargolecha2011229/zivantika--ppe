@@ -57,8 +57,14 @@ if uploaded_file:
             # Show output
             if results and len(results) > 0:
                 result_img = results[0].plot()  # numpy array (BGR)
+                
                 # Convert BGR to RGB for proper display in Streamlit
-                result_img_rgb = cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB)
+                if CV2_AVAILABLE:
+                    result_img_rgb = cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB)
+                else:
+                    # Alternative BGR to RGB conversion without cv2
+                    result_img_rgb = result_img[:, :, ::-1]
+                    
                 st.image(result_img_rgb, caption="Detection Result", use_container_width=True)
             else:
                 st.warning("⚠️ No detections found in the image.")
