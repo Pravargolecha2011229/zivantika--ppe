@@ -4,6 +4,9 @@ import streamlit as st
 import subprocess
 import importlib.util
 
+# Force NumPy 1.x compatibility
+os.environ["NPY_DISABLE_SVML"] = "1"
+
 # Set environment variables before any other imports
 os.environ["STREAMLIT_WATCHER_IGNORE"] = "tornado,torch"
 os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
